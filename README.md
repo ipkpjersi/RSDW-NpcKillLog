@@ -31,9 +31,13 @@ Counts are saved to `%LOCALAPPDATA%\RSDragonwilds\Saved\NpcKillLog-<character>-<
 
 ## How it works
 
-- **Kills** come from `AiAttackTicketsManager:OnAiDeath(ai)`, which the game runs once for every
-  AI that dies, with the dying AI's `AIAudioManagerComponent:HandleDeath(ai)` as a backup; one
-  death is never counted twice. `ProgressComponent:OnAIKilled` looks like the right event but is
+- **Kills** come from the Blueprint event `BP_DominionAICharacter_C:BP_OnDeath`, which runs once
+  for every creature that dies. The hook is registered once a world is loaded (retried every 5 s
+  until it works). A kill only counts when your character is in the creature's damage list
+  (`ThreatSystem.DamageInstigators` on its AI controller), so other players' kills are left out;
+  `OnlyMyKills = false` in `config.txt` counts every death instead. The first version's hooks,
+  `AiAttackTicketsManager:OnAiDeath` and `AIAudioManagerComponent:HandleDeath`, are still in
+  `main.lua`, commented out. `ProgressComponent:OnAIKilled` looks like the right event but is
   called straight from C++, so a Lua hook on it never runs.
 - **Names** come from the game's own `ST_AI_Names` string tables (`Scripts/npc_names.lua`),
   matched by the creature's AI data row name or its class name. `names.txt` overrides any name.
@@ -45,6 +49,6 @@ Counts are saved to `%LOCALAPPDATA%\RSDragonwilds\Saved\NpcKillLog-<character>-<
 
 ## Known limits
 
-- Neither death event says who made the kill, so every AI death is counted. That is exact in
-  single player; in co-op, kills by other players count too.
-- Co-op is untested.
+- A creature that only other players (or nothing, such as a fall) damaged is not counted. One you
+  helped kill counts for you even if someone else landed the last hit.
+- Co-op is untested, and the damage list may only be filled in on the host.

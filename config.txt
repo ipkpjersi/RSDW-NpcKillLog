@@ -46,3 +46,7 @@ MessageFontSize = 22
 
 # true = write a line to UE4SS.log for every kill
 LogKills = true
+
+# true = only count NPCs you damaged (the game's own damage list on each creature), so kills made
+# by other players in co-op are left out. false = count every NPC death near you.
+OnlyMyKills = true
