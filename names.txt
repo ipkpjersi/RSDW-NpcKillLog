@@ -1,0 +1,12 @@
+# NPC Kill Log - name corrections
+#
+# The mod names each NPC from the game's own name tables. If one shows up wrong, add a line here
+# and restart the game:
+#     <row or class name> = <name to show>
+# The row and class names are written to UE4SS.log the first time you kill each kind of NPC, as
+#     new NPC type: BP_AI_Example_Character_C (row ExampleRow) -> Example [row ExampleRow]
+# Either ExampleRow or BP_AI_Example_Character_C works on the left. Counts already saved under the
+# old name stay under it; rename them in the save file if you want them merged.
+
+# The game's own table spells this one without a space
+DragonBlue = Blue Dragon

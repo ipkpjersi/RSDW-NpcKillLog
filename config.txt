@@ -1,0 +1,48 @@
+# NPC Kill Log - settings
+#
+# Edit, then restart the game. Lines starting with # are ignored.
+
+# true = add NPC KILL LOG to the pause menu (Esc). That is how the kill log is opened.
+ShowInPauseMenu = true
+
+# The text of the pause menu entry
+MenuLabel = NPC KILL LOG
+
+# Optional key that also opens and closes the kill log. A key name like F4, K or HOME, optionally
+# with CTRL+, SHIFT+ or ALT+ in front (avoid F11: the game uses it for fullscreen). Off for now;
+# remove the # to turn it on. Esc always closes the window.
+# OpenKey = F4
+
+# Order of the list: count (most kills first) or name (A to Z)
+SortBy = count
+
+# Text size of the list, 8 to 48
+FontSize = 18
+
+# Size of the list area in pixels
+PanelWidth = 560
+PanelHeight = 640
+
+# true = show the mouse and send keys to the window while it is open (needed to type a search)
+CaptureMouse = true
+
+# true = after each kill, show "Your <NPC> kill count is now: <n>." on screen for a few seconds.
+# ShowKillMessages is for regular NPCs, ShowBossKillMessages for bosses and minibosses. The two
+# buttons in the kill log window flip these too; they save to toggles.txt, which wins over these.
+ShowKillMessages = true
+ShowBossKillMessages = true
+
+# Bosses are found from the game's own data (boss health bar, miniboss base classes, class name).
+# Fix any it gets wrong with comma separated names as the kill log shows them, e.g.
+# ExtraBosses = Dire Wolf, Lesser Demon
+ExtraBosses =
+NotBosses =
+
+# How long that message stays up, in seconds
+MessageSeconds = 4
+
+# Text size of that message, 8 to 48
+MessageFontSize = 22
+
+# true = write a line to UE4SS.log for every kill
+LogKills = true
