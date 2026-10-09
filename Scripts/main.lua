@@ -28,6 +28,12 @@
 --     (OpenKey, off by default). The pause menu is resumed first, since the pause menu's
 --     backdrop draws over any window added to the viewport while it is up.
 --     Esc or its CLOSE button closes it.
+--   * Controller: a pad's A presses CommonUI buttons from C++, so the click hook never sees it, and
+--     a window in the viewport never gets pad focus. So the pause menu entry is made selectable
+--     (A selects it, which a tick loop notices), and for a controller the kill log is docked inside
+--     the open pause menu instead, with D-pad links from the entry into it and back. No search box
+--     there (a pad cannot type); PREV PAGE / NEXT PAGE scroll the list. B closes the pause menu and
+--     the panel with it.
 --   * Kill message: after each kill a line of text shows for a few seconds, for example
 --     "Your Goblin Warrior kill count is now: 5." (MessageSeconds). Bosses and other NPCs have
 --     their own on/off switch (ShowBossKillMessages, ShowKillMessages), also flipped with the two
@@ -561,7 +567,8 @@ local function setInputForWindow(on)
 end
 
 -- The pause menu entry, set up further down; the window only needs to know it for the style
-local menu = { pm = nil, seen = {}, button = nil, buttonAddr = nil, hooked = false, announced = false, nextSearch = 0 }
+local menu = { pm = nil, seen = {}, button = nil, buttonAddr = nil, hooked = false, announced = false, nextSearch = 0,
+               mouseAt = -10, fitCount = -1, fitTries = 0 }
 local hookButtonClicks   -- defined with the pause menu entry below
 local BUTTON_CLASS = "/Game/UI/Common/WBP_DomAllCapsButton.WBP_DomAllCapsButton_C"
 
@@ -585,68 +592,54 @@ end
 
 local function flipToggle(t)
     cfg[t.key] = not cfg[t.key]
-    if isValid(t.button) then pcall(function() t.button:SetLabelText(FText(toggleLabel(t))) end) end
+    for _, b in ipairs({ t.button, t.padButton }) do
+        if isValid(b) then pcall(function() b:SetLabelText(FText(toggleLabel(t))) end) end
+    end
     saveToggles()
     log(toggleLabel(t))
 end
 
-local function buildWindow()
+-- The controller panel, docked inside the pause menu (see Controller further down)
+local pad = { open = false, frame = nil, list = nil, listBox = nil, header = nil, scroll = nil, pm = nil,
+              buttons = {}, actions = {}, mouseAt = 0, entrySeen = false, rev = nil, lineHeight = nil, shownLines = nil }
+-- Most the list area may take; the docked panel has to fit below the pause menu's top. The list is
+-- then trimmed to a whole number of lines (fitPadList), so no line is cut off at the bottom.
+local PAD_LIST_HEIGHT = 420
+
+-- Builds the kill log panel: the game's framed WBP_Panel with a title, a summary line, the list and
+-- the buttons. forPad = the controller version: no search box (a pad cannot type), PREV PAGE /
+-- NEXT PAGE buttons to scroll, and a shorter list. Returns the widgets, or nil and why.
+local function buildPanel(forPad)
     local pc = localController()
     local lib = widgetLibrary()
-    if not pc or not lib then
-        log("cannot open the window yet: no local player")
-        return false
-    end
+    if not pc or not lib then return nil, "no local player yet" end
     local panelClass = findClass("/Game/UI/Panels/WBP_Panel.WBP_Panel_C")
     local textClass = findClass("/Game/UI/Common/WBP_DomTextBlock.WBP_DomTextBlock_C") or findClass("/Script/UMG.TextBlock")
-    if not panelClass or not textClass then
-        log("cannot open the window: the game's panel widget was not found")
-        return false
-    end
+    if not panelClass or not textClass then return nil, "the game's panel widget was not found" end
 
     local okF, frame = pcall(function() return lib:Create(pc, panelClass, pc) end)
-    if not okF or not isValid(frame) then
-        log("cannot open the window: creating the panel failed")
-        return false
-    end
+    if not okF or not isValid(frame) then return nil, "creating the panel failed" end
     local tree = frame.WidgetTree
     local content = nil
     pcall(function() content = frame.PanelContent end)
-    if not isValid(content) then
-        log("cannot open the window: the panel has no PanelContent slot (game update?)")
-        return false
-    end
+    if not isValid(content) then return nil, "the panel has no PanelContent slot (game update?)" end
 
     local size = newWidget("SizeBox", tree)
     local column = newWidget("VerticalBox", tree)
     local scroll = newWidget("ScrollBox", tree)
-    local search = newWidget("EditableTextBox", tree)
-    if not (size and column and scroll and search) then
-        log("cannot open the window: a UMG widget class was not found")
-        return false
-    end
+    local search = not forPad and newWidget("EditableTextBox", tree) or nil
+    if not (size and column and scroll and (forPad or search)) then return nil, "a UMG widget class was not found" end
     pcall(function() size:SetWidthOverride(cfg.PanelWidth) end)
-    pcall(function() size:SetHeightOverride(cfg.PanelHeight) end)
+    if not forPad then pcall(function() size:SetHeightOverride(cfg.PanelHeight) end) end
     size:AddChild(column)
 
+    local w = { frame = frame, scroll = scroll, search = search, toggles = {}, listBox = nil }
+    w.header = newText(tree, textClass, "", 16, GREY)
+    w.list = newText(tree, textClass, "", cfg.FontSize, WHITE)
     local title = newText(tree, textClass, "NPC KILL LOG", 30, GOLD)
-    local header = newText(tree, textClass, "", 16, GREY)
-    local list = newText(tree, textClass, "", cfg.FontSize, WHITE)
-    local footer = newText(tree, textClass, "Esc to close   |   type to search   |   PageUp/PageDown to scroll", 14, GREY)
-    local closeButton = newGameButton(pc, "CLOSE")
-
-    -- The two message switches, each on its own row above CLOSE
-    local toggleButtons = {}
-    local toggleAddrs = {}
-    for _, t in ipairs(TOGGLES) do
-        local b = newGameButton(pc, toggleLabel(t))
-        if b then
-            t.button = b
-            toggleButtons[#toggleButtons + 1] = b
-            local okA, a = pcall(function() return b:GetAddress() end)
-            if okA and a then toggleAddrs[a] = t end
-        end
-    end
+    local hint = forPad and "A to press   |   Left goes back to the pause menu   |   B to close"
+        or "Esc to close   |   type to search   |   PageUp/PageDown to scroll"
+    local footer = newText(tree, textClass, hint, 14, GREY)
 
     local function addRow(widget, fill, padBottom)
         if not widget then return end
@@ -657,39 +650,83 @@ local function buildWindow()
         end
     end
     addRow(title, false, 2)
-    addRow(header, false, 10)
-    pcall(function() search:SetHintText(FText("Search NPCs")) end)
-    addRow(search, false, 10)
-    addRow(scroll, true, 8)
+    addRow(w.header, false, 10)
+    if search then
+        pcall(function() search:SetHintText(FText("Search NPCs")) end)
+        addRow(search, false, 10)
+    end
+    if forPad then
+        -- No height override on the whole panel here, so the list gets a fixed height of its own
+        local listBox = newWidget("SizeBox", tree)
+        if not listBox then return nil, "a UMG widget class was not found" end
+        pcall(function() listBox:SetHeightOverride(math.min(cfg.PanelHeight, PAD_LIST_HEIGHT)) end)
+        listBox:AddChild(scroll)
+        addRow(listBox, false, 8)
+        w.listBox = listBox
+    else
+        addRow(scroll, true, 8)
+    end
     addRow(footer, false, 6)
-    for _, b in ipairs(toggleButtons) do addRow(b, false, 6) end
-    addRow(closeButton, false, 0)
-    if list then scroll:AddChild(list) end
 
+    if forPad then
+        -- PREV PAGE and NEXT PAGE side by side, sharing the width
+        local row = newWidget("HorizontalBox", tree)
+        w.prev, w.next = newGameButton(pc, "PREV PAGE"), newGameButton(pc, "NEXT PAGE")
+        if row and w.prev and w.next then
+            for i, b in ipairs({ w.prev, w.next }) do
+                local okS, slot = pcall(function() return row:AddChildToHorizontalBox(b) end)
+                if okS and slot then
+                    pcall(function() slot:SetSize({ SizeRule = 1, Value = 1.0 }) end)
+                    pcall(function() slot:SetPadding({ Left = i == 2 and 6 or 0, Top = 0, Right = 0, Bottom = 0 }) end)
+                end
+            end
+            addRow(row, false, 6)
+        else
+            w.prev, w.next = nil, nil
+        end
+    end
+    -- The two message switches, each on its own row above CLOSE
+    for _, t in ipairs(TOGGLES) do
+        local b = newGameButton(pc, toggleLabel(t))
+        if b then
+            w.toggles[#w.toggles + 1] = { toggle = t, button = b }
+            addRow(b, false, 6)
+        end
+    end
+    w.close = newGameButton(pc, "CLOSE")
+    addRow(w.close, false, 0)
+    if w.list then scroll:AddChild(w.list) end
     content:AddChild(size)
-    local okV = pcall(function() frame:AddToViewport(9000) end)
+    return w
+end
+
+local function buildWindow()
+    local w, why = buildPanel(false)
+    if not w then
+        log("cannot open the window: " .. tostring(why))
+        return false
+    end
+    local okV = pcall(function() w.frame:AddToViewport(9000) end)
     if not okV then
         log("cannot open the window: AddToViewport failed")
         return false
     end
-    ui.frame, ui.list, ui.header, ui.search, ui.scroll, ui.lastFilter = frame, list, header, search, scroll, nil
+    ui.frame, ui.list, ui.header, ui.search, ui.scroll, ui.lastFilter = w.frame, w.list, w.header, w.search, w.scroll, nil
     ui.closeAddr = nil
-    if closeButton then pcall(function() ui.closeAddr = closeButton:GetAddress() end) end
-    ui.toggleAddrs = toggleAddrs
+    if w.close then pcall(function() ui.closeAddr = w.close:GetAddress() end) end
+    ui.toggleAddrs = {}
+    for _, e in ipairs(w.toggles) do
+        e.toggle.button = e.button
+        local okA, a = pcall(function() return e.button:GetAddress() end)
+        if okA and a then ui.toggleAddrs[a] = e.toggle end
+    end
     -- Opened with OpenKey and no pause menu entry, nothing else has started watching clicks yet
     hookButtonClicks()
     return true
 end
 
-refreshWindow = function()
-    if not ui.open or not isValid(ui.list) then return end
-    local filter = nil
-    if isValid(ui.search) then
-        local okT, t = pcall(function() return ui.search:GetText():ToString() end)
-        if okT and t and trim(t) ~= "" then filter = trim(t):lower() end
-    end
-    ui.lastFilter = filter or ""
-
+-- The list and the summary line, for a search filter (nil = everything)
+local function listText(filter)
     local entries = sortedEntries(filter and lookupKey(filter))
     local lines = {}
     for i, e in ipairs(entries) do lines[i] = e.name .. ": " .. formatCount(e.count) end
@@ -701,12 +738,48 @@ refreshWindow = function()
     else
         text = "No kills yet. Go hunting."
     end
-    pcall(function() ui.list:SetText(FText(text)) end)
 
     local types, total = 0, 0
     for _, c in pairs(state.kills) do types = types + 1; total = total + c end
     local head = killSummary(total, types)
     if filter then head = head .. "   |   showing " .. #entries end
+    return text, head
+end
+
+-- Trims the controller panel's list area to a whole number of lines, measured from the list text
+-- itself (its height over its line count), so the last visible line is never cut in half and
+-- PREV PAGE / NEXT PAGE can move by whole lines.
+local function fitPadList(text)
+    if not (isValid(pad.list) and isValid(pad.listBox)) then return end
+    local _, breaks = text:gsub("\n", "")
+    local lines = breaks + 1
+    pcall(function() pad.list:ForceLayoutPrepass() end)
+    local okH, h = pcall(function() return pad.list:GetDesiredSize().Y end)
+    if not (okH and type(h) == "number" and h > 0) then return end
+    local lineHeight = h / lines
+    local maxHeight = math.min(cfg.PanelHeight, PAD_LIST_HEIGHT)
+    local shown = math.max(1, math.floor(maxHeight / lineHeight))
+    pad.lineHeight, pad.shownLines = lineHeight, shown
+    pcall(function() pad.listBox:SetHeightOverride(shown * lineHeight) end)
+end
+
+-- Refreshes whichever of the window and the controller panel is open
+refreshWindow = function()
+    if pad.open and isValid(pad.list) then
+        local text, head = listText(nil)
+        pcall(function() pad.list:SetText(FText(text)) end)
+        pcall(function() pad.header:SetText(FText(head)) end)
+        fitPadList(text)
+    end
+    if not ui.open or not isValid(ui.list) then return end
+    local filter = nil
+    if isValid(ui.search) then
+        local okT, t = pcall(function() return ui.search:GetText():ToString() end)
+        if okT and t and trim(t) ~= "" then filter = trim(t):lower() end
+    end
+    ui.lastFilter = filter or ""
+    local text, head = listText(filter)
+    pcall(function() ui.list:SetText(FText(text)) end)
     pcall(function() ui.header:SetText(FText(head)) end)
 end
 
@@ -815,12 +888,15 @@ local function showKillMessage(message)
     end)
 end
 
-local function scrollBy(pages)
-    if not ui.open or not isValid(ui.scroll) then return end
+-- Scrolls a list by pages of its visible height (the window's by default)
+local function scrollBy(pages, scroll, height)
+    scroll = scroll or (ui.open and ui.scroll)
+    if not isValid(scroll) then return end
+    height = height or cfg.PanelHeight
     pcall(function()
-        local offset = ui.scroll:GetScrollOffset() + pages * cfg.PanelHeight * 0.8
-        local maxOffset = ui.scroll:GetScrollOffsetOfEnd()
-        ui.scroll:SetScrollOffset(math.max(0, math.min(maxOffset, offset)))
+        local offset = scroll:GetScrollOffset() + pages * height * 0.8
+        local maxOffset = scroll:GetScrollOffsetOfEnd()
+        scroll:SetScrollOffset(math.max(0, math.min(maxOffset, offset)))
     end)
 end
 
@@ -981,7 +1057,7 @@ local function onKill(ai)
         ExecuteWithDelay(1, function() ExecuteInGameThread(function() showKillMessage(message) end) end)
     end
     scheduleSave()
-    if ui.open then refreshWindow() end
+    if ui.open or pad.open then refreshWindow() end
 
     -- Forget old entries now and then so the table does not grow forever
     for a, t in pairs(recentKills) do
@@ -1160,9 +1236,16 @@ hookButtonClicks = function()
     local ok, err = pcall(RegisterHook, "/Script/CommonUI.CommonButtonBase:HandleButtonClicked", function(self)
         local okA, addr = pcall(function() return self:get():GetAddress() end)
         if not okA or not addr then return end
-        -- Only note the click here; the window is built on a later tick, outside the click handler
+        -- Only note the click here; the window is built on a later tick, outside the click handler.
+        -- A mouse click also selects a selectable button; mouseAt tells the controller check that
+        -- this selection came from the mouse.
         if addr == menu.buttonAddr then
+            menu.mouseAt = os.clock()
             ExecuteWithDelay(1, function() ExecuteInGameThread(function() openAfterPauseMenu(true) end) end)
+        elseif pad.actions[addr] then
+            pad.mouseAt = os.clock()
+            local action = pad.actions[addr]
+            ExecuteWithDelay(1, function() ExecuteInGameThread(action) end)
         elseif ui.closeAddr and addr == ui.closeAddr then
             ExecuteWithDelay(1, function() ExecuteInGameThread(closeWindow) end)
         elseif ui.toggleAddrs and ui.toggleAddrs[addr] then
@@ -1202,6 +1285,9 @@ local function ensureMenuButton(allowSearch)
 
     menu.button = b
     pcall(function() menu.buttonAddr = b:GetAddress() end)
+    -- Selectable only once the game has built it: a controller's A then selects it (padTick)
+    pcall(function() b:SetIsSelectable(true) end)
+    menu.fitTries = 3
     hookButtonClicks()
     if not menu.announced then
         menu.announced = true
@@ -1215,6 +1301,271 @@ local function scheduleMenuChecks()
     for i, delay in ipairs({ 100, 400, 1000, 2500 }) do
         ExecuteWithDelay(delay, function()
             ExecuteInGameThread(function() ensureMenuButton(i >= 3) end)
+        end)
+    end
+end
+
+-- ---------------------------------------------------------------------------
+-- Controller
+-- ---------------------------------------------------------------------------
+-- A controller's A presses CommonUI buttons from C++: the HandleButtonClicked hook never runs, but
+-- a selectable button does become selected. So our pause menu entry and the panel's buttons are
+-- selectable and padTick looks at them four times a second: selected with no mouse click just
+-- before means a controller press. A window in the viewport never gets controller focus, so for a
+-- controller the panel is docked inside the open pause menu, right of its list, with explicit D-pad
+-- links: Right from our entry goes into the panel, Left comes back.
+
+local PAD_X, PAD_Y, PAD_SCALE = 600, 180, 0.85   -- in the pause menu's 1920x1080 layout
+local NAV_LEFT, NAV_RIGHT, NAV_UP, NAV_DOWN = 0, 1, 2, 3   -- EUINavigation
+local DOCK_ID = "NpcKillLog"
+
+-- A selected button stays selected; turning selectable off and on again clears it
+local function unselect(b)
+    if not isValid(b) then return end
+    pcall(function() b:SetIsSelectable(false) end)
+    pcall(function() b:SetIsSelectable(true) end)
+end
+
+local function link(from, dir, to)
+    if isValid(from) and isValid(to) then pcall(function() from:SetNavigationRuleExplicit(dir, to) end) end
+end
+
+-- Other mods (Mod Menu, Storage Search) dock their controller panels at the same spot, so only one
+-- may be open at a time. They agree through two UE4SS shared variables: whoever docks a panel sets
+-- PauseDock.owner to its name and adds 1 to PauseDock.rev, and an open docked panel closes itself
+-- once rev has moved on and someone else is the owner.
+local function claimDock()
+    local okR, r = pcall(function() return ModRef:GetSharedVariable("PauseDock.rev") end)
+    local rev = math.floor(((okR and tonumber(r)) or 0) + 1)
+    local okO = pcall(function() ModRef:SetSharedVariable("PauseDock.owner", DOCK_ID) end)
+    local okV = pcall(function() ModRef:SetSharedVariable("PauseDock.rev", rev) end)
+    pad.rev = (okO and okV) and rev or nil   -- not published: never close on a stale read
+end
+
+local function dockTakenOver()
+    if not pad.rev then return nil end
+    local okR, r = pcall(function() return ModRef:GetSharedVariable("PauseDock.rev") end)
+    local okO, o = pcall(function() return ModRef:GetSharedVariable("PauseDock.owner") end)
+    if not (okR and okO) or tonumber(r) == nil or tonumber(r) == pad.rev then return nil end
+    if type(o) ~= "string" or o == "" or o == DOCK_ID then return nil end
+    return o
+end
+
+-- The game's pause menu list (VerticalBox_PauseMenu) sits in a canvas slot of fixed height. With a
+-- few mods adding entries the list runs past it: the mouse still reaches every entry, but the D-pad
+-- stops at the slot's edge. So the slot is grown to the list's height, keeping the top edge where
+-- the game put it. It only ever grows, so other mods doing the same never fight over it.
+local function fitPauseList(box)
+    local slot = nil
+    pcall(function() slot = box.Slot end)
+    if not isValid(slot) then return end
+    local okA, auto = pcall(function() return slot:GetAutoSize() end)
+    if okA and auto == true then return end   -- already sized by its content
+    local okO, off = pcall(function() return slot:GetOffsets() end)
+    local okN, anchors = pcall(function() return slot:GetAnchors() end)
+    local okL, align = pcall(function() return slot:GetAlignment() end)
+    if not (okO and off and okN and anchors and okL and align) then return end
+    local height, top, alignY = off.Bottom, off.Top, align.Y
+    if type(height) ~= "number" or type(top) ~= "number" or type(alignY) ~= "number" then return end
+    if math.abs(anchors.Maximum.Y - anchors.Minimum.Y) > 0.0001 then return end   -- stretched: the parent sets it
+    pcall(function() box:ForceLayoutPrepass() end)
+    local okD, need = pcall(function() return box:GetDesiredSize().Y end)
+    if not (okD and type(need) == "number") or need <= height + 0.5 then return end
+    need = math.ceil(need)
+    local edge = top - alignY * height   -- the top edge as the game laid it out
+    local okS = pcall(function()
+        slot:SetOffsets({ Left = off.Left, Top = edge + alignY * need, Right = off.Right, Bottom = need })
+    end)
+    if okS then log(string.format("pause list grown to %d high so a controller reaches every entry", need)) end
+end
+
+-- PREV PAGE / NEXT PAGE: a page is every whole line the list area shows, less one kept on screen so
+-- the reader does not lose their place
+local function scrollPad(pages)
+    if not isValid(pad.scroll) then return end
+    local lineHeight, shown = pad.lineHeight, pad.shownLines
+    if not (lineHeight and shown) then
+        scrollBy(pages, pad.scroll, math.min(cfg.PanelHeight, PAD_LIST_HEIGHT))
+        return
+    end
+    pcall(function()
+        local step = math.max(1, shown - 1) * lineHeight
+        local maxOffset = pad.scroll:GetScrollOffsetOfEnd()
+        local offset = pad.scroll:GetScrollOffset() + pages * step
+        -- Snap to a line so a page never starts half way through one
+        offset = math.floor(offset / lineHeight + 0.5) * lineHeight
+        pad.scroll:SetScrollOffset(math.max(0, math.min(maxOffset, offset)))
+    end)
+end
+
+local function closePad(refocus)
+    if not pad.open then return end
+    pad.open = false
+    if isValid(pad.frame) then pcall(function() pad.frame:RemoveFromParent() end) end
+    -- Our entry's Right goes back to the game's own navigation
+    if isValid(menu.button) then pcall(function() menu.button:SetNavigationRuleBase(NAV_RIGHT, 0) end) end
+    -- CLOSE: the focused button is gone, so put the pad back on the pause menu (on our entry if the
+    -- menu cannot refocus itself)
+    if refocus and isValid(pad.pm) then
+        if not pcall(function() pad.pm:RequestRefreshFocus() end) then
+            pcall(function() menu.button:SetUserFocus(localController()) end)
+        end
+    end
+    for _, t in ipairs(TOGGLES) do t.padButton = nil end
+    pad.frame, pad.list, pad.listBox, pad.header, pad.scroll, pad.pm = nil, nil, nil, nil, nil, nil
+    pad.buttons, pad.actions, pad.rev, pad.lineHeight = {}, {}, nil, nil
+end
+
+local function openPad()
+    if pad.open then return end
+    local pm = findPauseMenu(false)
+    local okA, active = pcall(function() return pm:IsActivated() end)
+    if not (isValid(pm) and okA and active) then return end
+    ensureCharacter()
+    local w, why = buildPanel(true)
+    if not w then
+        log("cannot open the controller panel: " .. tostring(why))
+        return
+    end
+    -- Dock it in this same call: the pause menu's root holds a CanvasPanel, directly or inside a
+    -- BackgroundBlur
+    local root, canvas = nil, nil
+    pcall(function() root = pm.WidgetTree.RootWidget end)
+    local okC, cls = pcall(function() return root:GetClass():GetFName():ToString() end)
+    if okC and cls == "CanvasPanel" then canvas = root else pcall(function() canvas = root:GetContent() end) end
+    local okS, slot = pcall(function() return canvas:AddChildToCanvas(w.frame) end)
+    if not (okS and isValid(slot)) then
+        log("cannot open the controller panel: could not dock it in the pause menu")
+        return
+    end
+    pcall(function() slot:SetAutoSize(true) end)
+    pcall(function() slot:SetPosition({ X = PAD_X, Y = PAD_Y }) end)
+    pcall(function() slot:SetZOrder(100) end)
+    pcall(function() w.frame:SetRenderTransformPivot({ X = 0, Y = 0 }) end)
+    pcall(function() w.frame:SetRenderScale({ X = PAD_SCALE, Y = PAD_SCALE }) end)
+
+    pad.open, pad.frame, pad.list, pad.header, pad.scroll, pad.pm = true, w.frame, w.list, w.header, w.scroll, pm
+    pad.listBox, pad.buttons, pad.actions = w.listBox, {}, {}
+    local function add(b, action)
+        if not isValid(b) then return end
+        local okB, a = pcall(function() return b:GetAddress() end)
+        if not (okB and a) then return end
+        pcall(function() b:SetIsSelectable(true) end)
+        pad.buttons[a], pad.actions[a] = b, action
+    end
+    add(w.prev, function() scrollPad(-1) end)
+    add(w.next, function() scrollPad(1) end)
+    for _, e in ipairs(w.toggles) do
+        e.toggle.padButton = e.button
+        add(e.button, function() flipToggle(e.toggle) end)
+    end
+    add(w.close, function() closePad(true) end)
+
+    -- D-pad: rows top to bottom (PREV/NEXT share the first), the ends lead to themselves so the pad
+    -- cannot fall out into the pause list, Left goes back to our entry
+    local rows = {}
+    if w.prev then rows[#rows + 1] = { w.prev, w.next } end
+    for _, e in ipairs(w.toggles) do rows[#rows + 1] = { e.button } end
+    if w.close then rows[#rows + 1] = { w.close } end
+    for i, row in ipairs(rows) do
+        local up, down = rows[i - 1] or row, rows[i + 1] or row
+        for j, b in ipairs(row) do
+            link(b, NAV_UP, up[1])
+            link(b, NAV_DOWN, down[1])
+            link(b, NAV_LEFT, row[j - 1] or menu.button)
+            link(b, NAV_RIGHT, row[j + 1] or b)
+        end
+    end
+    if rows[1] then link(menu.button, NAV_RIGHT, rows[1][1]) end
+    hookButtonClicks()
+    claimDock()
+    refreshWindow()
+    log("opened for a controller")
+end
+
+-- Four times a second on the game thread
+local function padTick()
+    if cfg.ShowInPauseMenu then ensureMenuButton(false) end
+    -- Grow the pause list when its entry count changed (our entry added, or another mod's), a few
+    -- times over, since a new button's size settles over a layout pass or two
+    if isValid(menu.button) and isValid(menu.pm) then
+        local box = nil
+        pcall(function() box = menu.pm.VerticalBox_PauseMenu end)
+        local okN, n = pcall(function() return box:GetChildrenCount() end)
+        if okN and type(n) == "number" and n ~= menu.fitCount then menu.fitCount, menu.fitTries = n, 3 end
+        if menu.fitTries > 0 and isValid(box) then
+            menu.fitTries = menu.fitTries - 1
+            fitPauseList(box)
+        end
+    end
+
+    if pad.open then
+        local okA, active = pcall(function() return pad.pm:IsActivated() end)
+        if not (okA and active) then closePad(false); return end   -- B or RESUME closed the pause menu
+        local owner = dockTakenOver()
+        if owner then
+            log("controller panel closed: " .. owner .. " opened its panel in the pause menu")
+            closePad(false)
+            return
+        end
+        -- Our entry again while the panel is open: nothing to do
+        local okE, entrySel = pcall(function() return menu.button:GetSelected() end)
+        if okE and entrySel then unselect(menu.button) end
+        for addr, b in pairs(pad.buttons) do
+            local okS, sel = pcall(function() return b:GetSelected() end)
+            if okS and sel then
+                unselect(b)
+                -- A mouse click selects it too, and the click hook has already run its action
+                if os.clock() - pad.mouseAt > 0.5 then
+                    local action = pad.actions[addr]
+                    if action then action() end
+                end
+                return
+            end
+        end
+        return
+    end
+
+    if not isValid(menu.button) then pad.entrySeen = false; return end
+    local okS, sel = pcall(function() return menu.button:GetSelected() end)
+    if not (okS and sel) then pad.entrySeen = false; return end
+    if os.clock() - menu.mouseAt < 1 then   -- clicked with the mouse: the window opens instead
+        pad.entrySeen = false
+        unselect(menu.button)
+        return
+    end
+    -- Give a mouse click one more tick to show up before calling it a controller press
+    if not pad.entrySeen then pad.entrySeen = true; return end
+    pad.entrySeen = false
+    unselect(menu.button)
+    openPad()
+end
+
+local padErrors = 0
+local function runPadTick()
+    local ok, err = pcall(padTick)
+    if not ok then
+        padErrors = padErrors + 1
+        if padErrors <= 5 then log("controller check failed: " .. tostring(err)) end
+    end
+end
+
+if cfg.ShowInPauseMenu then
+    -- On the game thread, so the widget calls never race the game. Older UE4SS builds without
+    -- LoopInGameThreadWithDelay get a LoopAsync that hands each tick to the game thread, one at a
+    -- time (a backlog of queued ticks during a long load can bring UE4SS down)
+    local okLoop = pcall(LoopInGameThreadWithDelay, 250, runPadTick)
+    if not okLoop then
+        local queued, queuedAt = false, 0
+        LoopAsync(250, function()
+            if queued and os.clock() - queuedAt < 5 then return false end
+            queued, queuedAt = true, os.clock()
+            local sent = pcall(ExecuteInGameThread, function()
+                queued = false
+                runPadTick()
+            end)
+            if not sent then queued = false end
+            return false
         end)
     end
 end
@@ -1241,6 +1592,8 @@ pcall(RegisterLoadMapPostHook, function()
         toast.frame, toast.text = nil, nil
         state.pc = nil
         menu.pm, menu.button, menu.buttonAddr, menu.seen = nil, nil, nil, {}
+        pad.open, pad.frame, pad.list, pad.listBox, pad.header, pad.scroll, pad.pm = false, nil, nil, nil, nil, nil, nil
+        pad.buttons, pad.actions, pad.rev, pad.lineHeight = {}, {}, nil, nil
     end)
     ExecuteWithDelay(5000, function() ExecuteInGameThread(function() ensureCharacter() end) end)
 end)

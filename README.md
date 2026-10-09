@@ -21,6 +21,10 @@ After each kill a message shows for a few seconds: `Your Kebbit kill count is no
 
 - Press Esc and pick **NPC KILL LOG** in the pause menu. Type in the box to search. PageUp /
   PageDown or the mouse wheel scroll. Esc or **CLOSE** closes it.
+- **Controller:** open the pause menu, move to **NPC KILL LOG** and press A. The kill log opens
+  inside the pause menu, to the right of its list. Press Right to move into it, A to press
+  **PREV PAGE** / **NEXT PAGE** (scroll), the two message switches or **CLOSE**, Left to go back
+  to the pause menu, and B to close everything. There is no search box with a controller.
 - **BOSS KILL MESSAGES** and **NPC KILL MESSAGES** in the window turn the kill messages on or off
   for bosses and for everything else. Kills are always counted.
 - Settings are in `config.txt` (restart the game after editing). Name corrections go in
@@ -46,6 +50,13 @@ Counts are saved to `%LOCALAPPDATA%\RSDragonwilds\Saved\NpcKillLog-<character>-<
   out. `ExtraBosses` / `NotBosses` in `config.txt` fix any it gets wrong.
 - **Window** is the game's own framed panel (`WBP_Panel`) opened from an entry added to the pause
   menu. Opening it resumes the game first, so the window is not hidden behind the pause menu.
+- **Controller:** a pad's A presses the game's buttons from C++, so the click hook the mouse uses
+  never sees it, and a window on top of the game never gets pad focus. So the pause menu entry is
+  made selectable (A selects it, and a check four times a second notices), and the controller
+  version of the panel is docked inside the pause menu with D-pad links into it and back. Mod Menu
+  and Storage Search dock their controller panels in the same spot; the `PauseDock.owner` /
+  `PauseDock.rev` shared variables make sure only one is open at a time. With many pause menu
+  entries the game's list box is too short for the D-pad to reach them all, so it is grown to fit.
 
 ## Known limits
 
